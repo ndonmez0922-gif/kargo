@@ -1,0 +1,6 @@
+__pycache__/
+.env
+orders.db
+.venv/
+venv/
+*.pyc

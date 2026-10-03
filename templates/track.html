@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="tr">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Kargo Takip</title>
+    <style>
+      body {
+        margin: 0;
+        background: #0a1220;
+        color: #edf3ff;
+        font-family: Arial, Helvetica, sans-serif;
+      }
+
+      .wrap {
+        max-width: 760px;
+        margin: 70px auto;
+        padding: 24px;
+        text-align: center;
+      }
+
+      .card {
+        background: rgba(21, 32, 50, 0.95);
+        border: 1px solid rgba(255,255,255,0.08);
+        border-radius: 18px;
+        padding: 30px 24px;
+        box-shadow: 0 12px 30px rgba(0,0,0,0.28);
+      }
+
+      h1 {
+        font-size: 2.2rem;
+        margin-bottom: 18px;
+      }
+
+      p {
+        color: #c6d4eb;
+        font-size: 1.05rem;
+      }
+
+      .status {
+        display: inline-block;
+        background: rgba(61, 220, 151, 0.12);
+        border: 1px solid rgba(61, 220, 151, 0.4);
+        padding: 10px 16px;
+        border-radius: 999px;
+        color: #bfffe1;
+        margin-top: 10px;
+      }
+
+      .meta {
+        margin-top: 24px;
+        text-align: left;
+        background: rgba(255,255,255,0.02);
+        border-radius: 12px;
+        padding: 16px;
+      }
+
+      .meta strong {
+        color: #f1f6ff;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <div class="card">
+        {% if not_found %}
+          <h1>Takip bulunamadı</h1>
+          <p>Bu takip numarasıyla eşleşen sipariş bulunamadı.</p>
+        {% else %}
+          <h1>Sayın müşterimiz, kargonuz yola çıktı.</h1>
+          <p>Takip numaranız ile kargo durumunu görebilirsiniz.</p>
+          <div class="status">Durum: {{ order["cargo_status"] }}</div>
+
+          <div class="meta">
+            <p><strong>Müşteri ID:</strong> {{ order["customer_id"] }}</p>
+            <p><strong>Kargo firması:</strong> {{ order["cargo_company"] }}</p>
+            <p><strong>Toplam tutar:</strong> {{ "%.2f"|format(order["total_amount"]) }} ₺</p>
+            <p><strong>Telefon:</strong> {{ order["phone"] }}</p>
+            <p><strong>Takip kodu:</strong> {{ order["tracking_token"] }}</p>
+          </div>
+        {% endif %}
+      </div>
+    </div>
+  </body>
+</html>
