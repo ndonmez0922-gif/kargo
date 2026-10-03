@@ -1,156 +1,222 @@
-import logging
 import os
+import sqlite3
 import uuid
+from datetime import datetime
 
-import requests
-from flask import Flask, jsonify, request, session
-from flask_sqlalchemy import SQLAlchemy
-from requests.exceptions import RequestException
+from flask import Flask, jsonify, redirect, render_template, request, url_for
 
 app = Flask(__name__)
-app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", "gizli-anahtar-kelime")
-app.config["SQLALCHEMY_DATABASE_URI"] = os.environ.get("DATABASE_URL", "sqlite:///local.db")
-app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
-app.config["SQLALCHEMY_ENGINE_OPTIONS"] = {
-    "pool_pre_ping": True,
-    "pool_recycle": 300,
-}
 
-db = SQLAlchemy(app)
-
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DB_PATH = os.path.join(BASE_DIR, "orders.db")
+app.config["SECRET_KEY"] = "dev-secret-key"
+app.config["SMS_MODE"] = "demo"
 
 
-class Order(db.Model):
-    __tablename__ = "orders"
-    id = db.Column(db.Integer, primary_key=True)
-    seller_id = db.Column(db.Integer, nullable=False)
-    customer_id = db.Column(db.Integer, nullable=False)
-    phone_number = db.Column(db.String(20), nullable=False)
-    total_amount = db.Column(db.Float, nullable=False)
-    cargo_company = db.Column(db.String(50), nullable=False)
-    tracking_token = db.Column(db.String(36), unique=True, nullable=False)
-    cargo_status = db.Column(db.String(50), default="Hazırlanıyor")
+def get_db_connection():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
 
 
-with app.app_context():
+def init_db():
+    conn = get_db_connection()
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS orders (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            seller_id INTEGER NOT NULL DEFAULT 1,
+            customer_id INTEGER NOT NULL DEFAULT 1,
+            phone TEXT NOT NULL,
+            total_amount REAL NOT NULL,
+            cargo_company TEXT NOT NULL,
+            tracking_token TEXT NOT NULL UNIQUE,
+            cargo_status TEXT NOT NULL DEFAULT 'Hazirlanıyor',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.commit()
+    conn.close()
+
+
+init_db()
+
+
+def make_tracking_url(token):
+    return url_for("track_order", token=token, _external=True)
+
+
+def send_sms(phone_number, link):
+    if not phone_number:
+        return False, "Telefon numarasi eksik."
+
+    if app.config["SMS_MODE"] == "demo":
+        return True, f"Demo SMS basariyla gonderildi."
+
+    return False, "SMS servisi kapali."
+
+
+def create_order_record(data):
+    if not data:
+        raise ValueError("Istek bos.")
+
+    seller_id = int(data.get("seller_id", 1))
+    customer_id = int(data.get("customer_id", 1))
+    total_amount = data.get("total_amount")
+    phone = str(data.get("phone", "")).strip()
+    cargo_company = str(data.get("cargo_company", "Yurtici Kargo")).strip() or "Yurtici Kargo"
+
+    if total_amount is None or total_amount == "":
+        raise ValueError("Toplam tutar zorunludur.")
+
     try:
-        db.create_all()
-    except Exception as exc:
-        logging.error("Tablo oluşturma hatası: %s", exc)
+        total_amount = float(total_amount)
+    except (TypeError, ValueError):
+        raise ValueError("Toplam tutar sayi olmalidir.")
+
+    if not phone:
+        raise ValueError("Telefon numarasi zorunludur.")
+
+    tracking_token = str(uuid.uuid4())
+    timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+
+    conn = get_db_connection()
+    conn.execute(
+        """
+        INSERT INTO orders (
+            seller_id,
+            customer_id,
+            phone,
+            total_amount,
+            cargo_company,
+            tracking_token,
+            cargo_status,
+            created_at,
+            updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, 'Hazirlanıyor', ?, ?)
+        """,
+        (
+            seller_id,
+            customer_id,
+            phone,
+            total_amount,
+            cargo_company,
+            tracking_token,
+            timestamp,
+            timestamp,
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    tracking_link = make_tracking_url(tracking_token)
+    sms_status = ""
+
+    if str(data.get("send_sms", "false")).lower() in {"true", "1", "on", "yes"}:
+        _, sms_status = send_sms(phone, tracking_link)
+
+    return {
+        "status": "success",
+        "tracking_token": tracking_token,
+        "tracking_link": tracking_link,
+        "sms_status": sms_status,
+        "message": "Siparis basariyla olusturuldu.",
+    }
 
 
 @app.route("/")
-def home():
-    return jsonify({
-        "status": "success",
-        "message": "Kargo Takip Sistemi API aktif ve çalışıyor!",
-        "endpoints": {
-            "siparis_olustur": "/api/orders/create (POST)",
-            "istatistikler": "/api/dashboard/stats (GET)",
-        },
-    }), 200
+def index():
+    return redirect("/seller")
 
 
-def send_sms_safe(phone_number, link):
-    api_url = "https://api.netgsm.com.tr/json/send"
-    if not phone_number:
-        return False, "Telefon numarası eksik."
+@app.route("/seller", methods=["GET", "POST"])
+def seller_dashboard():
+    if request.method == "POST":
+        payload = {
+            "seller_id": request.form.get("seller_id", 1),
+            "customer_id": request.form.get("customer_id", 1),
+            "phone": request.form.get("phone", ""),
+            "total_amount": request.form.get("total_amount", ""),
+            "cargo_company": request.form.get("cargo_company", "Yurtici Kargo"),
+            "send_sms": request.form.get("send_sms", "false"),
+        }
+        try:
+            create_order_record(payload)
+            return redirect("/seller")
+        except ValueError as exc:
+            return render_template("seller_dashboard.html", error=str(exc), orders=[], stats={"total_revenue": 0, "total_orders": 0}), 400
 
-    payload = {
-        "gsm": phone_number,
-        "message": f"Sayın müşterimiz, kargonuz yola çıktı. Takip linkiniz: {link}",
+    conn = get_db_connection()
+    orders = conn.execute("SELECT * FROM orders ORDER BY created_at DESC").fetchall()
+    conn.close()
+
+    total_revenue = 0
+    for order in orders:
+        total_revenue += float(order["total_amount"])
+
+    stats = {
+        "total_revenue": total_revenue,
+        "total_orders": len(orders),
     }
 
-    try:
-        response = requests.post(api_url, json=payload, timeout=5)
-        if response.status_code == 200:
-            return True, "SMS başarıyla gönderildi."
-        return False, "SMS servisi geçici olarak yanıt vermedi."
-    except RequestException as exc:
-        logging.error("SMS Ağ Hatası: %s", exc)
-        return False, "SMS gönderilemedi, ancak siparişiniz kaydedildi."
+    return render_template("seller_dashboard.html", orders=orders, stats=stats, error=None)
 
 
 @app.route("/api/orders/create", methods=["POST"])
-def create_order():
+def api_create_order():
+    data = request.get_json(silent=True) or request.form.to_dict()
     try:
-        data = request.get_json(silent=True) or request.form.to_dict()
-        if not data:
-            return jsonify({"error": "İstek gövdesi boş."}), 400
-
-        seller_id = session.get("user_id", 1)
-        total_amount = data.get("total_amount")
-        phone = data.get("phone")
-
-        if total_amount is None or phone in (None, ""):
-            return jsonify({"error": "Toplam tutar ve telefon numarası zorunludur."}), 400
-
-        try:
-            total_amount = float(total_amount)
-        except (TypeError, ValueError):
-            return jsonify({"error": "Toplam tutar sayısal olmalıdır."}), 400
-
-        customer_id = data.get("customer_id", 1)
-        try:
-            customer_id = int(customer_id)
-        except (TypeError, ValueError):
-            customer_id = 1
-
-        unique_token = str(uuid.uuid4())
-        new_order = Order(
-            seller_id=seller_id,
-            customer_id=customer_id,
-            phone_number=str(phone),
-            total_amount=total_amount,
-            cargo_company=str(data.get("cargo_company", "Yurtiçi Kargo")),
-            tracking_token=unique_token,
-        )
-
-        db.session.add(new_order)
-        db.session.commit()
-
-        tracking_link = f"https://kargo-takip-sistemi.vercel.app/kargo-takip/{unique_token}"
-        sms_result_message = ""
-
-        if str(data.get("send_sms", "false")).lower() in {"true", "1", "on", "yes"}:
-            _, sms_result_message = send_sms_safe(phone, tracking_link)
-
-        return jsonify({
-            "status": "success",
-            "message": "Sipariş ve kargo kaydı başarıyla oluşturuldu!",
-            "tracking_link": tracking_link,
-            "sms_status": sms_result_message,
-        }), 201
-
+        result = create_order_record(data)
+        return jsonify(result), 201
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
     except Exception as exc:
-        db.session.rollback()
-        logging.exception("Sipariş oluşturma hatası")
-        return jsonify({"error": "İşlem sırasında beklenmeyen bir hata oluştu."}), 500
+        return jsonify({"error": "Beklenmeyen bir hata olustudu."}), 500
 
 
-@app.route("/api/dashboard/stats", methods=["GET"])
-def get_dashboard_stats():
-    try:
-        role = session.get("role", "seller")
-        user_id = session.get("user_id", 1)
+@app.route("/api/dashboard/stats")
+def api_dashboard_stats():
+    conn = get_db_connection()
+    orders = conn.execute("SELECT total_amount FROM orders").fetchall()
+    conn.close()
 
-        if role == "admin":
-            total_revenue = db.session.query(db.func.coalesce(db.func.sum(Order.total_amount), 0.0)).scalar() or 0.0
-            total_orders = Order.query.count()
-            return jsonify({"role": "admin", "total_revenue": total_revenue, "total_orders": total_orders}), 200
+    total_revenue = 0
+    for order in orders:
+        total_revenue += float(order["total_amount"])
 
-        if role == "seller":
-            seller_revenue = db.session.query(db.func.coalesce(db.func.sum(Order.total_amount), 0.0)).filter_by(seller_id=user_id).scalar() or 0.0
-            seller_orders = Order.query.filter_by(seller_id=user_id).count()
-            return jsonify({"role": "seller", "revenue": seller_revenue, "orders_count": seller_orders}), 200
+    return jsonify({
+        "role": "seller",
+        "total_revenue": total_revenue,
+        "total_orders": len(orders),
+    })
 
-        return jsonify({"error": "Yetkisiz erişim"}), 403
 
-    except Exception as exc:
-        logging.exception("İstatistik getirme hatası")
-        return jsonify({"error": "Veriler getirilirken bir hata oluştu."}), 500
+@app.route("/t/<token>")
+def track_order(token):
+    conn = get_db_connection()
+    order = conn.execute("SELECT * FROM orders WHERE tracking_token = ?", (token,)).fetchone()
+    conn.close()
+
+    if order is None:
+        return render_template("track.html", not_found=True, order=None)
+
+    order_data = dict(order)
+    order_data["tracking_link"] = make_tracking_url(token)
+    return render_template("track.html", order=order_data, not_found=False)
+
+
+@app.errorhandler(404)
+def page_not_found(e):
+    return jsonify({"error": "Sayfa bulunamadi"}), 404
+
+
+@app.errorhandler(500)
+def server_error(e):
+    return jsonify({"error": "Sunucu hatasi"}), 500
 
 
 if __name__ == "__main__":
-    app.run(debug=True)
+    init_db()
+    app.run(debug=True, host="0.0.0.0", port=5000)
